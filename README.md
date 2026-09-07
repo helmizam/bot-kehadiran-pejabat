@@ -28,14 +28,21 @@ dan hantar laporan **PDF + Excel** kepada admin melalui **DM Telegram DAN emel**
    selesaikan ini — sebab itu setiap ahli (dan admin) WAJIB DM bot dan
    `/start` dahulu sebelum boleh terima sebarang mesej daripadanya.
 
-4. **Geolocation API (cell tower/WiFi) tidak praktikal untuk bot Telegram.**
+4. **Geolocation API (cell tower/WiFi) — DIPUTUSKAN TIDAK DIGUNAKAN.**
    Google ada API berasingan untuk anggarkan lokasi guna cell tower/WiFi
    mentah, tapi ini perlukan akses radio-level peranti yang Telegram Bot
    API tidak dedahkan kepada bot — bila ahli tekan "Share Location",
    peranti mereka sendiri dah gabungkan GPS/WiFi/cell tower ikut tetapan
-   OS dan cuma hantar koordinat akhir. Jadi versi ini guna sepenuhnya
-   lokasi yang dikongsi oleh Telegram (`request_location`), yang sudah
-   paling tepat yang boleh didapati.
+   OS dan cuma hantar koordinat akhir kepada bot, jadi menambah API ini
+   tidak beri apa-apa maklumat baharu. Versi ini tidak memanggil/guna
+   Geolocation API langsung — cuma lokasi yang dikongsi oleh Telegram
+   (`request_location`), yang sudah paling tepat yang boleh didapati.
+
+5. **DM peribadi dengan bot hanya untuk urusan kehadiran rasmi.** Kalau
+   ahli (bukan admin) hantar command tak dikenali atau mesej bebas
+   (bukan sebahagian daripada aliran /daftar → pilih status → lokasi),
+   bot akan balas arahan supaya hubungi admin group terus — bot ini
+   bukan chatbot umum.
 
 ## Fail dalam pakej ini
 
@@ -47,8 +54,9 @@ dan hantar laporan **PDF + Excel** kepada admin melalui **DM Telegram DAN emel**
 | `Procfile` | Arahan untuk deploy ke Railway (worker process) |
 | `holidays_selangor.json` | Senarai cuti umum Selangor 2026 (**sahkan/kemaskini setiap tahun**) |
 
-`attendance.db` (SQLite - roster + rekod kehadiran) dicipta secara automatik
-bila bot mula-mula jalan.
+Roster ahli + rekod kehadiran disimpan dalam **PostgreSQL** (bukan fail
+tempatan) — jadual dicipta secara automatik bila bot mula-mula jalan,
+asalkan `DATABASE_URL` sudah ditetapkan (lihat bahagian 6).
 
 ---
 
@@ -81,7 +89,39 @@ bila bot mula-mula jalan.
 
 > Guna penyedia emel lain? Tukar `SMTP_HOST`/`SMTP_PORT` — logik bot guna SMTP generik.
 
-## 4. Setup tempatan (untuk uji dahulu)
+## 4. Sediakan pangkalan data PostgreSQL
+
+Bot ini simpan roster & rekod kehadiran dalam PostgreSQL (bukan fail
+tempatan), supaya data kekal walaupun bot redeploy/restart di Railway.
+
+**Untuk production (Railway):**
+
+1. Dalam project Railway yang sama dengan bot ini, klik **New** → **Database**
+   → **Add PostgreSQL**.
+2. Railway akan cipta servis Postgres dengan `DATABASE_URL` sendiri.
+3. Dalam servis **bot** (bukan servis Postgres), pergi ke tab **Variables**,
+   tambah variable `DATABASE_URL` dengan nilai reference:
+   ```
+   ${{Postgres.DATABASE_URL}}
+   ```
+   (Railway automatik gantikan ini dengan connection string sebenar —
+   nama `Postgres` di atas ikut nama servis database anda, semak nama
+   sebenar dalam Railway kalau ia berbeza.)
+
+**Untuk uji tempatan (pilihan):**
+
+- Paling mudah guna Docker:
+  ```bash
+  docker run --name attendance-db -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres
+  ```
+  Kemudian dalam `.env`: `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres`
+- Atau guna Postgres percuma dalam talian (Supabase/Neon) dan salin
+  connection string yang diberi ke `DATABASE_URL`.
+- Atau terus guna connection string luaran daripada Postgres Railway
+  (tab **Connect** pada servis Postgres) untuk uji tempatan terhadap
+  database production — berhati-hati kalau buat ini.
+
+## 5. Setup tempatan (untuk uji dahulu)
 
 ```bash
 cd telegram-location-bot
@@ -90,7 +130,7 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# Isikan sekurang-kurangnya TELEGRAM_BOT_TOKEN dan GOOGLE_MAPS_API_KEY dahulu
+# Isikan sekurang-kurangnya TELEGRAM_BOT_TOKEN, GOOGLE_MAPS_API_KEY, dan DATABASE_URL dahulu
 
 python bot.py
 ```
@@ -116,7 +156,7 @@ Selepas sekurang-kurangnya seorang ahli `/daftar`, admin boleh hantar
 testing). Ikuti arahan yang bot DM kepada anda: pilih status → (kalau
 Lain-lain, taip sebab) → tekan butang kongsi lokasi.
 
-## 5. Jadual & cutoff
+## 6. Jadual & cutoff
 
 Dalam `.env`:
 
@@ -149,28 +189,26 @@ disahkan lewat) dan cuti gantian. Edit fail ini setiap tahun — format:
 [{"date": "2026-01-01", "name": "Tahun Baharu"}, ...]
 ```
 
-## 6. Deploy ke Railway (supaya bot jalan 24/7)
+## 7. Deploy ke Railway (supaya bot jalan 24/7)
 
 1. Push kod ini ke satu repo GitHub (**jangan** sertakan `.env` sebenar
-   atau `attendance.db` sebenar — `.env.example` sahaja yang perlu dalam repo).
+   — `.env.example` sahaja yang perlu dalam repo).
 2. Di [Railway](https://railway.app), cipta **New Project** → **Deploy from GitHub repo**.
-3. Railway detect `requirements.txt` + `Procfile` dan run sebagai **worker**
+3. Tambah database Postgres dalam project yang sama (lihat Langkah 4 di atas)
+   kalau belum buat lagi.
+4. Railway detect `requirements.txt` + `Procfile` dan run sebagai **worker**
    (bot guna polling, bukan webhook — tak perlu port/HTTP).
-4. Dalam tab **Variables**, tambah SEMUA env var dalam `.env.example`:
-   `TELEGRAM_BOT_TOKEN`, `GOOGLE_MAPS_API_KEY`, `GROUP_CHAT_ID`,
-   `ADMIN_USER_ID`, `TIMEZONE`, `CHECKIN_TIME`, `CUTOFF_TIME`,
-   `REMINDER_INTERVAL_MINUTES`, `HOLIDAYS_FILE`, `DB_FILE`, `SMTP_HOST`,
-   `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `ADMIN_EMAIL`.
-5. Deploy. Semak **Deploy Logs** — patut nampak `Bot bermula (polling)...`.
+5. Dalam tab **Variables** servis bot, tambah SEMUA env var dalam
+   `.env.example`: `TELEGRAM_BOT_TOKEN`, `GOOGLE_MAPS_API_KEY`,
+   `GROUP_CHAT_ID`, `ADMIN_USER_ID`, `ADMIN_CONTACT`, `TIMEZONE`,
+   `CHECKIN_TIME`, `CUTOFF_TIME`, `REMINDER_INTERVAL_MINUTES`,
+   `HOLIDAYS_FILE`, `DATABASE_URL` (guna `${{Postgres.DATABASE_URL}}`),
+   `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `ADMIN_EMAIL`.
+6. Deploy. Semak **Deploy Logs** — patut nampak `Bot bermula (polling)...`.
 
-> **PENTING — storan berkekalan:** `attendance.db` (roster + rekod
-> kehadiran) disimpan sebagai fail tempatan. Pada Railway, storan fail
-> biasa adalah *ephemeral* — **boleh hilang bila redeploy/restart**,
-> bermakna roster & sejarah kehadiran hilang juga. Untuk elak ini,
-> attach satu **Railway Volume** (Settings → Volumes) dan mount pada
-> folder tempat `attendance.db`/`holidays_selangor.json` berada (tetapkan
-> `DB_FILE=/data/attendance.db` dan letak volume di `/data`), supaya data
-> kekal walaupun bot redeploy. Beritahu saya kalau nak saya bantu setkan ini.
+> Sebab roster & rekod kehadiran kini disimpan dalam **PostgreSQL**
+> (bukan fail tempatan), data kekal walaupun bot redeploy/restart —
+> tak perlu Railway Volume lagi untuk data ini.
 
 ## Command yang tersedia
 
@@ -184,6 +222,7 @@ disahkan lewat) dan cuti gantian. Edit fail ini setiap tahun — format:
 | `/jadual` | DM / group | Papar jadual & cutoff semasa |
 | `/mula` | DM / group (admin sahaja) | Mulakan sesi kehadiran serta-merta |
 | `/laporan` | DM / group (admin sahaja) | Jana & hantar laporan hari ini serta-merta |
+| `/resetkehadiran` | DM / group (admin sahaja) | **Untuk testing/pembetulan sahaja** — padam semua rekod kehadiran hari ini supaya boleh `/mula` semula dari kosong. Rekod kehadiran disimpan ikut (tarikh, ahli), jadi respons awal ahli pada hari yang sama kekal dikira "sudah respon" walaupun `/mula` dijalankan semula berkali-kali; command ini sengaja disediakan untuk admin "reset" tarikh semasa secara manual bila perlu. |
 
 ## Susun atur aliran (ringkasan visual)
 
@@ -205,7 +244,7 @@ disahkan lewat) dan cuti gantian. Edit fail ini setiap tahun — format:
 
 ## Kemungkinan penambahbaikan akan datang
 
-- Railway Volume / database luaran (Postgres) untuk storan kekal — disyorkan sebelum guna production.
 - Laporan mingguan/bulanan tambahan (bukan setakat harian).
 - Butang "Hadir di Pejabat" jika nanti perlukan status kehadiran biasa juga.
 - Auto-kemaskini kalendar cuti umum tahun hadapan.
+- Connection pool (cth. psycopg2 pool / asyncpg) kalau bilangan ahli/operasi membesar dengan ketara.
