@@ -248,6 +248,15 @@ def init_db() -> None:
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS report_delegates (
+                    user_id BIGINT PRIMARY KEY,
+                    added_by BIGINT NOT NULL,
+                    added_at TEXT NOT NULL
+                )
+                """
+            )
     finally:
         conn.close()
 
@@ -349,6 +358,64 @@ def clear_attendance_for_date(date_str: str) -> int:
             return cur.rowcount
     finally:
         conn.close()
+
+
+# ----------------------------------------------------------------------------
+# Pembantu admin (report delegate) - ahli yang dibenarkan admin untuk jana
+# laporan (/laporan) sendiri melalui DM peribadi, tanpa keistimewaan admin lain
+# (/mula, /resetkehadiran tetap admin sahaja).
+# ----------------------------------------------------------------------------
+
+def add_report_delegate(user_id: int, added_by: int) -> None:
+    conn = get_db()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO report_delegates (user_id, added_by, added_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    added_by = EXCLUDED.added_by,
+                    added_at = EXCLUDED.added_at
+                """,
+                (user_id, added_by, datetime.now(TZ).isoformat()),
+            )
+    finally:
+        conn.close()
+
+
+def remove_report_delegate(user_id: int) -> int:
+    conn = get_db()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM report_delegates WHERE user_id = %s", (user_id,))
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
+def is_report_delegate(user_id: int) -> bool:
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM report_delegates WHERE user_id = %s", (user_id,))
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def get_report_delegates() -> list[dict]:
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM report_delegates ORDER BY added_at")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def can_generate_report(user_id: int) -> bool:
+    return is_admin(user_id) or is_report_delegate(user_id)
 
 
 # ----------------------------------------------------------------------------
@@ -584,9 +651,17 @@ def send_report_email(rows: list[dict], target_date: date, pdf_path: Path, xlsx_
 
 
 async def send_report_dm(context: ContextTypes.DEFAULT_TYPE, rows: list[dict], target_date: date,
-                          pdf_path: Path, xlsx_path: Path) -> None:
-    if not ADMIN_USER_ID:
-        logger.warning("ADMIN_USER_ID belum ditetapkan - laporan DM Telegram dilangkau.")
+                          pdf_path: Path, xlsx_path: Path, chat_id: int | str | None = None) -> None:
+    """DM laporan (caption + PDF + Excel) kepada chat_id yang diberi.
+
+    Default (chat_id=None) ialah ADMIN_USER_ID - digunakan oleh alur automatik
+    (finalize_attendance selepas cutoff/early-finish). Bila dipanggil dari
+    /laporan on-demand, chat_id diisi dengan ID ahli/admin yang memintanya,
+    supaya laporan sampai terus kepada orang yang minta, bukan sentiasa admin.
+    """
+    target_chat_id = chat_id if chat_id is not None else ADMIN_USER_ID
+    if not target_chat_id:
+        logger.warning("Tiada chat_id/ADMIN_USER_ID ditetapkan - laporan DM Telegram dilangkau.")
         return
 
     responded = sum(1 for r in rows if r["status"] != "Tiada Respon")
@@ -595,15 +670,15 @@ async def send_report_dm(context: ContextTypes.DEFAULT_TYPE, rows: list[dict], t
         f"{responded}/{len(rows)} ahli telah respon."
     )
     try:
-        await context.bot.send_message(chat_id=ADMIN_USER_ID, text=caption)
+        await context.bot.send_message(chat_id=target_chat_id, text=caption)
         with pdf_path.open("rb") as f:
-            await context.bot.send_document(chat_id=ADMIN_USER_ID, document=f, filename=pdf_path.name)
+            await context.bot.send_document(chat_id=target_chat_id, document=f, filename=pdf_path.name)
         with xlsx_path.open("rb") as f:
-            await context.bot.send_document(chat_id=ADMIN_USER_ID, document=f, filename=xlsx_path.name)
+            await context.bot.send_document(chat_id=target_chat_id, document=f, filename=xlsx_path.name)
     except TelegramError as exc:
         logger.error(
-            "Gagal DM laporan kepada admin (%s). Pastikan admin dah /start bot secara peribadi dahulu. Ralat: %s",
-            ADMIN_USER_ID, exc,
+            "Gagal DM laporan kepada %s. Pastikan dia dah /start bot secara peribadi dahulu. Ralat: %s",
+            target_chat_id, exc,
         )
 
 
@@ -785,7 +860,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(
             "Bot Sistem Kehadiran sedia digunakan dalam group ini.\n\n"
             "Setiap ahli perlu DM bot ini secara peribadi dan hantar /daftar Nama Penuh untuk berdaftar.\n\n"
-            "Command admin: /mula, /laporan, /resetkehadiran, /senarai, /jadual, /chatid"
+            "Command admin: /mula, /laporan, /resetkehadiran, /tambahpembantu, /buangpembantu, "
+            "/senaraipembantu, /senarai, /jadual, /chatid"
         )
 
 
@@ -859,16 +935,28 @@ async def cmd_mula(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_laporan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin sahaja: jana & hantar laporan (PDF+Excel) secara adhoc, DM atau group.
+    """Admin ATAU pembantu admin (report delegate): jana & hantar laporan (PDF+Excel)
+    secara adhoc terus ke DM peribadi orang yang memintanya.
 
     Tanpa argumen: laporan hari ini (atau sesi semasa jika ada).
     Dengan argumen tarikh: /laporan YYYY-MM-DD - laporan bagi tarikh lampau.
+    Admin boleh guna dalam DM atau group (laporan tetap ke DM peribadinya).
+    Pembantu admin (bukan admin) MESTI guna dalam DM peribadi bot.
     Nota: roster (nama/username ahli) diambil ikut keadaan SEKARANG, jadi ahli
     yang didaftar/dibuang selepas tarikh yang diminta tidak mencerminkan roster
     pada tarikh sebenar tersebut.
     """
-    if not is_admin(update.effective_user.id):
-        await update.effective_message.reply_text("Command ini untuk admin sahaja.")
+    user_id = update.effective_user.id
+    admin = is_admin(user_id)
+
+    if not admin and not is_report_delegate(user_id):
+        await update.effective_message.reply_text("Command ini untuk admin atau pembantu admin sahaja.")
+        return
+
+    if not admin and update.effective_chat.type != ChatType.PRIVATE:
+        await update.effective_message.reply_text(
+            "Sebagai pembantu admin, sila DM bot ini secara peribadi untuk jana laporan."
+        )
         return
 
     if context.args:
@@ -892,10 +980,14 @@ async def cmd_laporan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     pdf_path = build_pdf_report(rows, target_date)
     xlsx_path = build_excel_report(rows, target_date)
-    await send_report_dm(context, rows, target_date, pdf_path, xlsx_path)
-    send_report_email(rows, target_date, pdf_path, xlsx_path)
+    await send_report_dm(context, rows, target_date, pdf_path, xlsx_path, chat_id=user_id)
+    if admin:
+        send_report_email(rows, target_date, pdf_path, xlsx_path)
 
-    await update.effective_message.reply_text("Laporan telah dihantar (DM Telegram & emel, jika konfigurasi lengkap).")
+    await update.effective_message.reply_text(
+        "Laporan telah dihantar ke DM peribadi anda"
+        + (" & emel admin (jika konfigurasi lengkap)." if admin else ".")
+    )
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -923,6 +1015,101 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"🗑️ Rekod kehadiran bertarikh {date_str} telah dipadam ({deleted} rekod).\n"
         f"Anda boleh /mula semula untuk testing bersih."
     )
+
+
+def _parse_user_id_arg(args: list[str]) -> int | None:
+    if not args:
+        return None
+    try:
+        return int(args[0].strip())
+    except ValueError:
+        return None
+
+
+async def cmd_tambah_pembantu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin sahaja: lantik seorang ahli sebagai "pembantu admin" - dibenarkan
+    jana laporan (/laporan, harian & adhoc) sendiri melalui DM peribadi bot,
+    tanpa keistimewaan admin lain (/mula, /resetkehadiran, lantik/buang
+    pembantu tetap admin sahaja)."""
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Command ini untuk admin sahaja.")
+        return
+
+    target_id = _parse_user_id_arg(context.args)
+    if target_id is None:
+        await update.effective_message.reply_text(
+            "Format: /tambahpembantu USER_ID\n\n"
+            "Dapatkan USER_ID ahli tersebut (dia boleh hantar /adminid dalam DM "
+            "peribadi bot untuk dapatkan User ID Telegram sendiri, lepas tu "
+            "hantar nombor itu kepada admin)."
+        )
+        return
+
+    add_report_delegate(target_id, update.effective_user.id)
+
+    member = get_member(target_id)
+    nama = member["full_name"] if member else str(target_id)
+    reply_lines = [f"✅ {nama} (ID: {target_id}) kini pembantu admin untuk jana laporan."]
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=(
+                "Salam. Anda telah dilantik sebagai *pembantu admin* untuk jana laporan "
+                "kehadiran bagi group ini.\n\n"
+                "DM bot ini secara peribadi bila-bila masa:\n"
+                "• /laporan — laporan hari ini\n"
+                "• /laporan YYYY-MM-DD — laporan tarikh lain (cth. /laporan 2026-09-05)\n\n"
+                "Anda TIDAK boleh mulakan sesi kehadiran (/mula) atau reset rekod - "
+                "itu kekal hak admin sahaja."
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except TelegramError:
+        reply_lines.append(
+            "⚠️ Tak dapat DM notifikasi kepadanya (mungkin belum /start bot secara "
+            "peribadi) - tapi dia dah boleh guna /laporan sebaik sahaja dia mulakan "
+            "chat peribadi dengan bot ini."
+        )
+
+    await update.effective_message.reply_text("\n".join(reply_lines))
+
+
+async def cmd_buang_pembantu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin sahaja: buang taraf pembantu admin daripada seseorang."""
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Command ini untuk admin sahaja.")
+        return
+
+    target_id = _parse_user_id_arg(context.args)
+    if target_id is None:
+        await update.effective_message.reply_text("Format: /buangpembantu USER_ID")
+        return
+
+    removed = remove_report_delegate(target_id)
+    if removed:
+        await update.effective_message.reply_text(f"Taraf pembantu admin bagi ID {target_id} telah dibuang.")
+    else:
+        await update.effective_message.reply_text(f"ID {target_id} bukan pembantu admin buat masa ini.")
+
+
+async def cmd_senarai_pembantu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin sahaja: senarai semua pembantu admin (report delegate) semasa."""
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Command ini untuk admin sahaja.")
+        return
+
+    delegates = get_report_delegates()
+    if not delegates:
+        await update.effective_message.reply_text("Tiada pembantu admin dilantik buat masa ini.")
+        return
+
+    lines = ["👥 Pembantu admin (jana laporan):"]
+    for d in delegates:
+        member = get_member(d["user_id"])
+        nama = member["full_name"] if member else "(bukan ahli roster berdaftar)"
+        lines.append(f"- {nama} — ID: {d['user_id']}")
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 # ----------------------------------------------------------------------------
@@ -1111,6 +1298,9 @@ def main() -> None:
     application.add_handler(CommandHandler("mula", cmd_mula))
     application.add_handler(CommandHandler("laporan", cmd_laporan))
     application.add_handler(CommandHandler("resetkehadiran", cmd_reset))
+    application.add_handler(CommandHandler("tambahpembantu", cmd_tambah_pembantu))
+    application.add_handler(CommandHandler("buangpembantu", cmd_buang_pembantu))
+    application.add_handler(CommandHandler("senaraipembantu", cmd_senarai_pembantu))
 
     # Fallback (MESTI selepas semua CommandHandler khusus di atas) - command
     # tak dikenali dalam DM peribadi diarahkan hubungi admin, bukan dilayan bot.
