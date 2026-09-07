@@ -334,6 +334,23 @@ def get_attendance_for_date(date_str: str) -> list[dict]:
         conn.close()
 
 
+def clear_attendance_for_date(date_str: str) -> int:
+    """Padam semua rekod kehadiran bagi satu tarikh. Pulangkan bilangan baris dipadam.
+
+    Untuk testing/pembetulan sahaja (cth. /resetkehadiran) - membolehkan admin
+    "reset" hari semasa tanpa perlu tunggu esok, memandangkan rekod kehadiran
+    disimpan per (tarikh, user_id) dan kekal sepanjang hari itu merentasi
+    berapa kali /mula dijalankan semula.
+    """
+    conn = get_db()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM attendance WHERE date = %s", (date_str,))
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
 # ----------------------------------------------------------------------------
 # Reverse geocoding (Google Maps)
 # ----------------------------------------------------------------------------
@@ -768,7 +785,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(
             "Bot Sistem Kehadiran sedia digunakan dalam group ini.\n\n"
             "Setiap ahli perlu DM bot ini secara peribadi dan hantar /daftar Nama Penuh untuk berdaftar.\n\n"
-            "Command admin: /mula, /laporan, /senarai, /jadual, /chatid"
+            "Command admin: /mula, /laporan, /resetkehadiran, /senarai, /jadual, /chatid"
         )
 
 
@@ -857,6 +874,33 @@ async def cmd_laporan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     send_report_email(rows, target_date, pdf_path, xlsx_path)
 
     await update.effective_message.reply_text("Laporan telah dihantar (DM Telegram & emel, jika konfigurasi lengkap).")
+
+
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin sahaja: padam rekod kehadiran HARI INI (untuk testing/pembetulan).
+
+    Rekod kehadiran disimpan per (tarikh, user_id), jadi respons awal seorang
+    ahli pada hari yang sama akan kekal dikira "sudah respon" walaupun /mula
+    dijalankan semula berkali-kali - ini memang sengaja untuk kegunaan produksi
+    (admin re-trigger /mula tak patut hapuskan check-in yang sah). Command ini
+    wujud khas untuk keadaan admin nak "reset" hari semasa secara manual, cth.
+    semasa testing senario reminder/cutoff.
+    """
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Command ini untuk admin sahaja.")
+        return
+
+    date_str = context.bot_data.get("session_date") or datetime.now(TZ).date().isoformat()
+    deleted = clear_attendance_for_date(date_str)
+
+    # Reset juga state dalam-memori berkaitan supaya tak tersangkut separuh jalan
+    context.bot_data["pending"] = {}
+    context.bot_data["awaiting_note"] = set()
+
+    await update.effective_message.reply_text(
+        f"🗑️ Rekod kehadiran bertarikh {date_str} telah dipadam ({deleted} rekod).\n"
+        f"Anda boleh /mula semula untuk testing bersih."
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -1044,6 +1088,7 @@ def main() -> None:
     application.add_handler(CommandHandler("jadual", cmd_jadual))
     application.add_handler(CommandHandler("mula", cmd_mula))
     application.add_handler(CommandHandler("laporan", cmd_laporan))
+    application.add_handler(CommandHandler("resetkehadiran", cmd_reset))
 
     # Fallback (MESTI selepas semua CommandHandler khusus di atas) - command
     # tak dikenali dalam DM peribadi diarahkan hubungi admin, bukan dilayan bot.
