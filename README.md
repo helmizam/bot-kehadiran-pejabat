@@ -221,7 +221,7 @@ disahkan lewat) dan cuti gantian. Edit fail ini setiap tahun — format:
 | `/chatid` | DM / group | Papar Chat ID (untuk `GROUP_CHAT_ID`) |
 | `/jadual` | DM / group | Papar jadual & cutoff semasa |
 | `/mula` | DM / group (admin sahaja) | Mulakan sesi kehadiran serta-merta |
-| `/laporan` | DM / group (admin sahaja) | Jana & hantar laporan hari ini serta-merta |
+| `/laporan` atau `/laporan YYYY-MM-DD` | DM / group (admin sahaja) | Jana & hantar laporan (PDF+Excel, DM+emel) secara adhoc — tanpa tarikh = hari ini, dengan tarikh (cth. `/laporan 2026-09-05`) = laporan tarikh lampau tersebut. Boleh admin DM terus bot bila-bila masa tanpa perlu tunggu sesi/cutoff. Nota: roster (nama ahli) ikut keadaan semasa, bukan snapshot pada tarikh diminta. |
 | `/resetkehadiran` | DM / group (admin sahaja) | **Untuk testing/pembetulan sahaja** — padam semua rekod kehadiran hari ini supaya boleh `/mula` semula dari kosong. Rekod kehadiran disimpan ikut (tarikh, ahli), jadi respons awal ahli pada hari yang sama kekal dikira "sudah respon" walaupun `/mula` dijalankan semula berkali-kali; command ini sengaja disediakan untuk admin "reset" tarikh semasa secara manual bila perlu. |
 
 ## Susun atur aliran (ringkasan visual)
