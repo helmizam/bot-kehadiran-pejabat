@@ -859,14 +859,36 @@ async def cmd_mula(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_laporan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin sahaja: jana & hantar laporan (PDF+Excel) secara adhoc, DM atau group.
+
+    Tanpa argumen: laporan hari ini (atau sesi semasa jika ada).
+    Dengan argumen tarikh: /laporan YYYY-MM-DD - laporan bagi tarikh lampau.
+    Nota: roster (nama/username ahli) diambil ikut keadaan SEKARANG, jadi ahli
+    yang didaftar/dibuang selepas tarikh yang diminta tidak mencerminkan roster
+    pada tarikh sebenar tersebut.
+    """
     if not is_admin(update.effective_user.id):
         await update.effective_message.reply_text("Command ini untuk admin sahaja.")
         return
 
-    date_str = context.bot_data.get("session_date") or datetime.now(TZ).date().isoformat()
-    target_date = date.fromisoformat(date_str)
+    if context.args:
+        date_arg = context.args[0].strip()
+        try:
+            target_date = date.fromisoformat(date_arg)
+        except ValueError:
+            await update.effective_message.reply_text(
+                "Format tarikh tidak sah.\n"
+                "Guna: /laporan YYYY-MM-DD (cth. /laporan 2026-09-05)\n"
+                "Atau /laporan sahaja (tanpa tarikh) untuk laporan hari ini."
+            )
+            return
+    else:
+        date_str_default = context.bot_data.get("session_date") or datetime.now(TZ).date().isoformat()
+        target_date = date.fromisoformat(date_str_default)
+
+    date_str = target_date.isoformat()
     rows = build_report_rows(date_str)
-    await update.effective_message.reply_text("Menjana & menghantar laporan...")
+    await update.effective_message.reply_text(f"Menjana & menghantar laporan {target_date.strftime('%d/%m/%Y')}...")
 
     pdf_path = build_pdf_report(rows, target_date)
     xlsx_path = build_excel_report(rows, target_date)
